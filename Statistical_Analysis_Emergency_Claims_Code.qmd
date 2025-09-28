@@ -1,0 +1,474 @@
+---
+title: "506 Final Project Code"
+author: "Snigdha Pakala"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+# Final Project Code and Context
+
+## Data Preparation
+
+#### In this Section, I did the following:
+
+-   Filtered the data to the relevant population required to answer my research questions
+
+-   Created my two main groups for statistical comparison using the column AGI_Stub.
+
+-   Merged Medicare data with IRS data after ensuring substantial coverage of Medicare zipcodes in the IRS data
+
+```{r}
+###############################################
+# Loading the data and libraries
+###############################################
+library(readr)
+library(dplyr)
+library(data.table)
+
+medicare_data <- read.csv("~/Downloads/Medicare_Physician_Other_Practitioners_by_Provider_and_Service_2022.csv")
+
+irs_data <- read.csv("~/Downloads/20zpallagi.csv")
+
+###############################################
+# Check for missing values
+###############################################
+
+medicare_missing <- colSums(is.na(medicare_data))
+# print(medicare_missing)
+
+irs_missing <- colSums(is.na(irs_data))
+# print(irs_missing)
+
+
+###############################################
+# Filtering and formatting of data
+###############################################
+
+emergency_codes <- c("99281", "99282", "99283", "99284", "99285",  # Type A ED visits
+                    "G0380", "G0381", "G0382", "G0383", "G0384")   # Type B ED visits
+
+
+# Get aggregated data for medicare emergency service relevant rows
+medicare_emergency <- medicare_data %>%
+  filter(HCPCS_Cd %in% emergency_codes) %>%
+  group_by(Rndrng_Prvdr_Zip5) %>%
+  summarize(
+    total_claims = sum(Tot_Srvcs, na.rm = TRUE),
+    claims_per_beneficiary = sum(Tot_Srvcs, na.rm = TRUE) / sum(Tot_Benes, na.rm = TRUE),
+    avg_submitted_charge = mean(Avg_Sbmtd_Chrg, na.rm = TRUE),
+    avg_medicare_payment = mean(Avg_Mdcr_Pymt_Amt, na.rm = TRUE),
+    total_beneficiaries = sum(Tot_Benes, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Ensure ZIP codes are consistently formatted in both datasets
+medicare_emergency$Rndrng_Prvdr_Zip5 <- sprintf("%05d", as.numeric(medicare_emergency$Rndrng_Prvdr_Zip5))
+
+irs_data$zipcode <- sprintf("%05d", as.numeric(irs_data$zipcode))  
+
+# Check unique ZIP codes in medicare data
+medicare_unique <- length(unique(medicare_emergency$Rndrng_Prvdr_Zip5))
+
+# Check unique ZIP codes in IRS data
+irs_unique <- length(unique(irs_data$zipcode))
+
+# Check ZIP code overlap
+common_zips <- intersect(medicare_emergency$Rndrng_Prvdr_Zip5, irs_data$zipcode)
+
+# Display results
+print(paste("Unique ZIP codes in Medicare data:", medicare_unique))
+print(paste("Unique ZIP codes in IRS data:", irs_unique))
+print(paste("Number of common ZIP codes:", length(common_zips)))
+
+
+###############################################
+# Creation of two main groups for comparison
+###############################################
+
+# Make income categories - use N1 (number of returns) and A00100 (AGI) from irs data
+irs_categories <- irs_data %>%
+  group_by(zipcode) %>%
+  mutate(total_returns = sum(N1)) %>%
+  summarize(
+    pct_high_poverty = sum(N1[agi_stub %in% c(1, 2)]) / first(total_returns),
+    pct_middle = sum(N1[agi_stub %in% c(3, 4)]) / first(total_returns),
+    pct_affluent = sum(N1[agi_stub %in% c(5, 6)]) / first(total_returns)
+  ) %>%
+  ungroup() %>%
+  mutate(income_category = case_when(
+    pct_high_poverty >= pct_middle & pct_high_poverty >= pct_affluent ~ "high_poverty",
+    pct_affluent >= pct_middle & pct_affluent >= pct_high_poverty ~ "affluent",
+    TRUE ~ "middle"
+  ))
+
+income_freq <- irs_categories %>%
+  group_by(income_category) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(percentage = (count / sum(count)) * 100)
+
+# Format table
+library(kableExtra)
+income_freq %>%
+  kable(col.names = c("Income Category", "Count", "Percentage"),
+        digits = 2,
+        align = c("l", "r", "r"),
+        caption = "Distribution of Income Categories by AGI") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 12
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(2:3, width = "250px") %>%
+  add_header_above(c(" " = 1, "IRS Data" = 2))
+
+###############################################
+# Merging of data and cleaning
+###############################################
+
+merged_data <- medicare_emergency %>%
+  inner_join(irs_categories, by = c("Rndrng_Prvdr_Zip5" = "zipcode"))
+
+# Create frequency table
+income_category_freq <- merged_data %>%
+  group_by(income_category) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(percentage = (count / sum(count)) * 100)
+
+# Display formatted table
+income_category_freq %>%
+  kable(col.names = c("Income Category", "Count", "Percentage"),
+        digits = 2,
+        align = c("l", "r", "r"),
+        caption = "Distribution of Income Categories") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 12
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(2:3, width = "250px") %>%
+  add_header_above(c(" " = 1, "Statistics" = 2))
+
+# Adjust for similar power in both groups by sampling the same number of observations from each
+set.seed(123)
+
+affluent_group <- merged_data %>% 
+  filter(income_category == "affluent") %>%
+  sample_n(659)
+
+high_poverty_group <- merged_data %>% 
+  filter(income_category == "high_poverty") %>%
+  sample_n(659) # default, this will be all of the observations in the group
+
+# Final data set to work with
+merged_analysis <- bind_rows(affluent_group, high_poverty_group)
+
+# Confirm consistent number of rows per comaprison groups
+merged_analysis %>%
+  group_by(income_category) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(percentage = (count/sum(count)) * 100) %>%
+  kable(col.names = c("Income Category", "Count", "Percentage"),
+        digits = 2,
+        align = c("c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE,
+                position = "center") %>%
+  column_spec(2:3, width = "250px") 
+```
+
+## Research Question: How does the frequency of emergency service claims differ between high-poverty and affluent zip codes?
+
+#### In this section, I did the following:
+
+-   Calculate summary statistics for both of the relevant income population groups
+
+-   Look at the groups' distributions and transform them due to heavy skew
+
+-   Run diagnostic tests to see if the stronger linear model assumptions are reasonable
+
+-   Compare affluent group's claims to high_poverty group's claims and see if there is a statistically significant difference in them
+
+```{r}
+library(kableExtra)
+library(ggplot2)
+library(car)
+library(lmtest)
+
+###############################################
+#Summary Statistics For Each Group - Claim Data
+###############################################
+
+# Calculate median
+median_claims_by_income <- merged_analysis %>%
+  filter(income_category %in% c("high_poverty", "affluent")) %>%
+  group_by(income_category) %>%
+  summarize(
+    median_claims = median(total_claims, na.rm = TRUE)  # Median ZIP-level claims
+  ) %>%
+  ungroup()
+
+# Calculate standard deviation
+sd_claims_by_income <- merged_analysis %>%
+  filter(income_category %in% c("high_poverty", "affluent")) %>%
+  group_by(income_category) %>%
+  summarize(
+    sd_total_claims = sd(total_claims, na.rm = TRUE)  # Standard deviation of total claims
+  ) %>%
+  ungroup()
+
+claims_comparison <- merged_analysis %>%
+  filter(income_category %in% c("high_poverty", "affluent")) %>%
+  group_by(income_category) %>%
+  summarize(
+    n_zips = n(),
+    total_claims = sum(total_claims),  
+    claims_per_beneficiary = mean(claims_per_beneficiary, na.rm = TRUE),  
+    mean_claims = total_claims / n_zips,  
+  ) %>%
+  ungroup() %>%
+  left_join(median_claims_by_income, by = "income_category") %>% 
+  left_join(sd_claims_by_income, by = "income_category")
+
+# Display summary statistics
+knitr::kable(claims_comparison,
+             col.names = c("Income Category", "Number of ZIPs", "Total Claims", 
+                          "Claims/Beneficiary", "Mean Claims/ZIP",
+                          "Median Claims/ZIP", "Standard Deviation Claims"),
+             digits = 2,
+             align = c("l", "r", "r", "r", "r", "r", "r")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 12
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(2:7, width = "100px") 
+
+###############################################
+# Distribution Plots Per Group
+###############################################
+
+# Plot histogram for high-poverty data
+ggplot(high_poverty_group, aes(x = total_claims)) +
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Total Claims: High Poverty",
+    x = "Total Claims",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+# Plot histogram for affluent data
+ggplot(affluent_group, aes(x = total_claims)) +
+  geom_histogram(binwidth = 100, fill = "lightgreen", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Total Claims: Affluent",
+    x = "Total Claims",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+###############################################
+# Log Transformation Per Group Due To Skew
+###############################################
+
+# Add Log of Total Claims to Data at Raw Level
+medicare_emergency <- medicare_emergency %>%
+  mutate(log_total_claims = log(total_claims))
+
+# Redo Merged Analysis
+merged_analysis <- medicare_emergency %>%
+  inner_join(irs_categories, by = c("Rndrng_Prvdr_Zip5" = "zipcode"))
+
+# Provide Table of Log Comparisons
+log_claims_comparison <- merged_analysis %>%
+  filter(income_category %in% c("high_poverty", "affluent")) %>%
+  group_by(income_category) %>%
+  summarize(
+    median_log_claims = median(log_total_claims, na.rm = TRUE),
+    sd_log_claims = sd(log_total_claims, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Display Table
+knitr::kable(
+  log_claims_comparison,
+  col.names = c("Income Category", "Median Log Claims", "Standard Deviation Log Claims"),
+  digits = 2,
+  align = c("l", "r", "r")
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 12
+  ) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(2:3, width = "250px")
+
+# Recalculate groups to include log_claims
+set.seed(123)
+
+affluent_group <- merged_analysis %>% 
+  filter(income_category == "affluent") %>%
+  sample_n(659)
+
+high_poverty_group <- merged_analysis %>% 
+  filter(income_category == "high_poverty") %>%
+  sample_n(659) # default, this will be all of the observations in the group
+
+# Histogram for high-poverty data
+ggplot(high_poverty_group, aes(x = log_total_claims)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Log-Transformed Total Claims: High Poverty",
+    x = "Log Total Claims",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+# Histogram for affluent data
+ggplot(affluent_group, aes(x = log_total_claims)) +
+  geom_histogram(binwidth = 0.1, fill = "lightgreen", color = "black", alpha = 0.7) +
+  labs(
+    title = "Log-Transformed Total Claims: Affluent",
+    x = "Log Total Claims",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+###############################################
+# Diagnostics on Log Model - Linear Model Assumptions
+###############################################
+
+# Linearity check
+
+affluent_data <- merged_analysis %>% 
+  filter(income_category == "affluent")
+
+high_poverty_data <- merged_analysis %>% 
+  filter(income_category == "high_poverty")
+
+plot_affluent <- ggplot(affluent_data, aes(x = income_category, y = log_total_claims)) +
+  geom_jitter(width = 0.2, alpha = 0.7, color = "blue") +
+  labs(
+    title = "Scatter Plot of log_total_claims for Affluent Category",
+    x = "Income Category",
+    y = "Log Total Claims"
+  ) +
+  theme_minimal()
+
+# Plot for high poverty
+plot_high_poverty <- ggplot(high_poverty_data, aes(x = income_category, y = log_total_claims)) +
+  geom_jitter(width = 0.2, alpha = 0.7, color = "green") +
+  labs(
+    title = "Scatter Plot of log_total_claims for High Poverty Category",
+    x = "Income Category",
+    y = "Log Total Claims"
+  ) +
+  theme_minimal()
+
+plot_affluent
+plot_high_poverty
+
+lm_model <- lm(formula = log_total_claims ~ income_category, data = merged_analysis)
+
+
+# Check for normality
+plot(lm_model, which = 2) 
+
+#Check for homoskedasticity
+
+# Homoskedasticity check 1
+
+bptest(lm_model)
+
+# Homoskedasticity check 2
+ncvTest(lm_model)
+
+###############################################
+# Statistical Testing
+###############################################
+
+t_test_result <- t.test(log_total_claims ~ income_category, 
+                        data = merged_analysis,
+                        subset = income_category %in% c("high_poverty", "affluent"))
+
+# Display t-test results
+print(t_test_result)
+
+# Exponentiate the confidence intervals for the coefficients - use HC SEs just in case
+confint_robust <- confint(lm_model, vcov = vcovHC(lm_model, type = "HC3"))
+exp_confint <- exp(confint_robust)
+
+exp_coef <- exp(coef(lm_model))
+
+
+# Display results
+results <- data.frame(
+  Coefficient = names(exp_coef),
+  Estimate = exp_coef,
+  CI_Lower = exp_confint[, 1],
+  CI_Upper = exp_confint[, 2]
+)
+
+filtered_results <- results %>%
+  filter(Coefficient %in% c("(Intercept)", "income_categoryhigh_poverty"))
+
+# Display filtered results
+print(filtered_results)
+```
+
+## Final Notes/Results
+
+-   The diagnostic tests showed that the stronger linear model assumptions are reasonable to make for the log_total_claims variable in this dataset, due to the following:
+
+    -   Linearity: Scatterplot seems reasonably spread out with no apparent pattern
+
+    -   Normality**:** There are some deviations in the tails from normality, but our dataset is large enough that we will assume normality assumption is reasonable here
+
+    -   Homoskedasticity:
+
+        -   The null hypothesis of the BP test and the ncv test states that residuals have constant variance (homoskedasticity). Since our P-Value is higher than alpha = 0.05 in both tests, we fail to reject this null, and homoskedasticity is a reasonable assumption
+
+        -   Just in case, we will use hetersokedasticity-consistent standard errors; it is always a more robust alternative than OLS
+
+-   Since the diaagnostic checks seem to have passed, we can go ahead and trust the confidence interval and p-value output from R as reasonable.
+
+-   Interpretation of these results:
+
+    -   The affluent group has an average of about 408 total claims, with a 95% confidence range of 357.91 to 465.37 claims.
+
+    -   The estimate for "income_categoryhigh_poverty**"** being 1.1831 implies that the high poverty group has 18.31% more claims than the affluent group
+
+    -   Here, the confidence interval is \[1.0312, 1.3575\], which tells us a good amount of information.
+
+        -   First, if the confidence interval includes 1, the difference between groups is not statistically significant because a ratio of 1 implies no difference. Here, our interval does not include 1, implying the difference between groups is statistically different.
+
+        -   Also, the numbers themselves imply that the high_poverty group has between 3.1% to 35.7% more claims than the affluent group, with 95% confidence.
+
+-   Thus, to answer our question, we see that there *is* a statistically significant difference in the frequency of claims between the high poverty and affluent groups present in the data, and our data implies that high_poverty individuals have about 18% more claims than the ones in the affluent population.
+
+    ## Attribution of Sources
+
+-   <https://r-charts.com/distribution/histogram-binwidth-ggplot2/> Used this for bin width in ggplot for lots of data
+
+-   <https://dplyr.tidyverse.org/reference/mutate-joins.html> used this for left join syntax in tidyverse
+
+-   <https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html> used this for Kable and Kable Extra aspects
+
+-   <https://sscc.wisc.edu/sscc/pubs/RegDiag-R/homoscedasticity.html> used this for documentation of the Breusch-Pagan test
+
+-   <https://www.rdocumentation.org/packages/lmtest/versions/0.9-40/topics/bptest> also used this for the Breusch-Pagan test
+
+-   I used ChatGPT to smooth out my report because there were some parts that didn't flow as well. I sent my original draft to it and it kept my same ideas and phrases but just used better words than I could. I am not the best at writing, but wanted the report to still have that professional tone.
